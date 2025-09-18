@@ -7,7 +7,7 @@ app = Flask(__name__)
 CORS(app, resources = {r"/*": {"origins": "http://localhost:5173"}})
 
 
-socketio = SocketIO(app, cors_allowed_origins="*")  # allow our frontend origin
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 @app.get("/")
 
