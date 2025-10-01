@@ -1,0 +1,6 @@
+# Python venv
+Backend/.venv/
+
+# Node modules and builds
+Frontend/node_modules/
+Frontend/dist/
