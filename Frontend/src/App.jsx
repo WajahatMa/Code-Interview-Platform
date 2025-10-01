@@ -1,39 +1,41 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 
+// Helper: get ?room= from URL (defaults to "default")
 function getRoomId() {
   const p = new URLSearchParams(window.location.search);
   return p.get("room") || "default";
 }
 
 export default function App() {
-  const [msgs, setMsgs] = useState([]);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
-  // Create a single socket instance for this component lifetime
+  // Create socket only once (useMemo ensures this)
   const socket = useMemo(() => io("http://127.0.0.1:5000"), []);
 
   useEffect(() => {
-    // Join a room (by URL: /?room=demo)
+    // Join a room
     socket.emit("join", { roomId: getRoomId() });
 
-    // Listen for confirmation (optional)
+    // Listen for confirmation
     socket.on("joined", ({ roomId }) => {
       console.log("Joined room:", roomId);
     });
 
-    // Receive broadcast chat messages
+    // Listen for messages
     socket.on("message", (payload) => {
-      setMsgs((prev) => [...prev, payload.text]);
+      setMessages((prev) => [...prev, payload.text]);
     });
 
-    // Cleanup listeners on hot reload/unmount
+    // Cleanup listeners if hot reloaded
     return () => {
       socket.off("joined");
       socket.off("message");
     };
   }, [socket]);
 
+  // Send a message
   const send = () => {
     const text = input.trim();
     if (!text) return;
@@ -45,9 +47,20 @@ export default function App() {
     <main style={{ fontFamily: "system-ui", padding: 24, maxWidth: 720 }}>
       <h1>Realtime Chat (Day 2 MVP)</h1>
 
-      <div style={{ margin: "12px 0", padding: 12, border: "1px solid #ddd", borderRadius: 8, minHeight: 120 }}>
-        {msgs.length === 0 ? <em>No messages yet</em> :
-          msgs.map((m, i) => <div key={i}>• {m}</div>)}
+      <div
+        style={{
+          margin: "12px 0",
+          padding: 12,
+          border: "1px solid #ddd",
+          borderRadius: 8,
+          minHeight: 120,
+        }}
+      >
+        {messages.length === 0 ? (
+          <em>No messages yet</em>
+        ) : (
+          messages.map((m, i) => <div key={i}>• {m}</div>)
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 8 }}>
@@ -63,7 +76,8 @@ export default function App() {
       </div>
 
       <p style={{ marginTop: 10, color: "#666" }}>
-        Tip: open this page in two tabs with the same room, e.g. <code>?room=demo</code>
+        Tip: open this page in two tabs with the same room, e.g.{" "}
+        <code>?room=demo</code>
       </p>
     </main>
   );
