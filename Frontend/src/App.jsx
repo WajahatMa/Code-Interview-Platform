@@ -1,142 +1,250 @@
+// App.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
-import Editor from "./Editor";
+import Editor from "./Editor.jsx"; // adjust path if needed
 
-// room from ?room=, default "default"
+// ---------- socket singleton ----------
+const socket = io("http://localhost:5050", {
+  transports: ["websocket"],
+  withCredentials: true,
+  autoConnect: true,
+});
+
+// ---------- helpers ----------
 function getRoomId() {
   const p = new URLSearchParams(window.location.search);
   return p.get("room") || "default";
 }
+function getInitialName() {
+  const p = new URLSearchParams(window.location.search);
+  const fromURL = p.get("name");
+  if (fromURL && fromURL.trim()) return fromURL.trim();
 
-// simple throttle
-function useThrottle(ms = 150) {
-  const last = useRef(0);
-  return () => {
-    const now = Date.now();
-    if (now - last.current > ms) {
-      last.current = now;
-      return true;
-    }
-    return false;
-  };
+  const saved = localStorage.getItem("mu_name");
+  if (saved && saved.trim()) return saved.trim();
+
+  const entered = window.prompt("Enter a display name:", "");
+  const name =
+    entered && entered.trim()
+      ? entered.trim()
+      : `User-${Math.random().toString(36).slice(2, 6)}`;
+  localStorage.setItem("mu_name", name);
+  return name;
 }
 
+// ---------- component ----------
 export default function App() {
-  const [code, setCode] = useState(`# Welcome!
-# Edit in one tab; watch it update in another (same ?room=)
-print("Hello, world!")`);
-  const [msgs, setMsgs] = useState([]);
-  const [input, setInput] = useState("");
-
-  // Force WebSocket transport; include credentials for safety
-  const socket = useMemo(
-    () =>
-      io("http://localhost:5050", {
-        transports: ["websocket"], // skip long-polling which is failing
-        withCredentials: true,
-        reconnectionAttempts: 5,
-        timeout: 8000,
-      }),
-    []
-  );
+  const roomId = useMemo(() => getRoomId(), []);
+  const [connected, setConnected] = useState(false);
+  const [name, setName] = useState(getInitialName());
+  const [members, setMembers] = useState([]);
+  const [messages, setMessages] = useState([]); // [{name,text,ts}]
+  const chatInputRef = useRef(null);
 
   useEffect(() => {
-    // diagnostics
-    socket.on("connect", () => {
-      console.log("✅ Connected to backend. Socket ID:", socket.id);
-    });
-    socket.on("disconnect", () => console.log("❌ Disconnected"));
-    socket.on("connect_error", (err) => console.error("⛔ connect_error:", err));
-    socket.on("error", (e) => console.error("socket error:", e));
-    socket.on("server:hello", (p) => console.log("👋 server:hello", p));
+    // ---- handlers ----
+    const onConnect = () => {
+      setConnected(true);
+      socket.emit("join", { roomId, name });
+      console.log("[socket] connected; join", roomId, "as", name);
+    };
+    const onDisconnect = () => {
+      setConnected(false);
+      console.log("[socket] disconnected");
+    };
+    const onRoomState = (s) => {
+      console.log("[socket] room:state", s);
+      if (s?.you && s.you !== name) {
+        setName(s.you);
+        localStorage.setItem("mu_name", s.you);
+      }
+      if (Array.isArray(s?.members)) setMembers(s.members);
+      if (Array.isArray(s?.chat)) setMessages(s.chat);
+    };
+    const onPresence = (p) => {
+      console.log("[socket] room:presence", p);
+      if (Array.isArray(p?.members)) setMembers(p.members);
+    };
+    const onChatRecv = (payload) => {
+      console.log("[socket] chat:recv", payload);
+      if (payload && typeof payload.text === "string" && payload.text.length) {
+        setMessages((prev) => [...prev, payload]);
+      }
+    };
+    const onYouRenamed = (p) => {
+      console.log("[socket] you:renamed", p);
+      if (p?.name) {
+        setName(p.name);
+        localStorage.setItem("mu_name", p.name);
+      }
+    };
 
-    // join room
-    const roomId = getRoomId();
-    console.log("➡️  join", roomId);
-    socket.emit("join", { roomId });
-
-    socket.on("joined", ({ roomId }) => console.log("🔐 joined", roomId));
-
-    // chat + code listeners
-    socket.on("message", (payload) => {
-      console.log("📬 message", payload);
-      setMsgs((prev) => [...prev, payload.text]);
-    });
-    socket.on("code:apply", (payload) => {
-      console.log("🪄 code:apply len", (payload?.code || "").length);
-      setCode(payload?.code ?? "");
-    });
-
-    // test message after 1s
-    const t = setTimeout(() => {
-      socket.emit("message", { roomId, text: "Hello from this tab 👋" });
-    }, 1000);
+    // ---- wire ----
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("room:state", onRoomState);
+    socket.on("room:presence", onPresence);
+    socket.on("chat:recv", onChatRecv);
+    socket.on("you:renamed", onYouRenamed);
 
     return () => {
-      clearTimeout(t);
-      socket.off("connect");
-      socket.off("disconnect");
-      socket.off("connect_error");
-      socket.off("error");
-      socket.off("server:hello");
-      socket.off("joined");
-      socket.off("message");
-      socket.off("code:apply");
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("room:state", onRoomState);
+      socket.off("room:presence", onPresence);
+      socket.off("chat:recv", onChatRecv);
+      socket.off("you:renamed", onYouRenamed);
     };
-  }, [socket]);
+  }, [roomId, name]);
 
-  const canSendNow = useThrottle(150);
+  // ---- chat ----
+  const sendChat = () => {
+    const text = chatInputRef.current?.value?.trim();
+    if (!text) return;
 
-  const onCodeChange = (next) => {
-    setCode(next);
-    if (canSendNow()) {
-      socket.emit("code:update", { roomId: getRoomId(), code: next });
-    }
+    // 1) optimistic local echo
+    const entry = { name, text, ts: Date.now() / 1000 };
+    setMessages((prev) => [...prev, entry]);
+
+    // 2) tell server (which will broadcast to others)
+    socket.emit("chat:send", { roomId, text });
+
+    chatInputRef.current.value = "";
   };
 
-  const sendChat = () => {
-    const text = input.trim();
-    if (!text) return;
-    socket.emit("message", { roomId: getRoomId(), text });
-    setInput("");
+  // ---- rename ----
+  const rename = () => {
+    const next = window.prompt("Choose a new display name:", name);
+    if (!next) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === name) return;
+    socket.emit("name:update", { name: trimmed });
+    // final name comes via you:renamed + room:presence
   };
 
   return (
-    <main style={{ fontFamily: "system-ui", padding: 16 }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1 style={{ margin: 0 }}>Realtime Code (Day 3)</h1>
-        <div style={{ fontSize: 14, color: "#555" }}>
-          Room: <code>{getRoomId()}</code>
+    <div
+      style={{
+        height: "100vh",
+        width: "100vw",
+        display: "grid",
+        gridTemplateColumns: "1fr 340px",
+        gridTemplateRows: "auto 1fr",
+        gridTemplateAreas: `
+          "topbar  topbar"
+          "editor  sidebar"
+        `,
+      }}
+    >
+      {/* Topbar */}
+      <div
+        style={{
+          gridArea: "topbar",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 14px",
+          borderBottom: "1px solid #e5e5e5",
+          background: "#fafafa",
+        }}
+      >
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <strong>Multi-User Code Interview Platform</strong>
+          <span>
+            Room: <code>{roomId}</code>
+          </span>
+          <span>
+            Status:{" "}
+            <span title={connected ? "Connected" : "Disconnected"}>
+              {connected ? "🟢 connected" : "⚪️ offline"}
+            </span>
+          </span>
         </div>
-      </header>
-
-      <section style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 12, marginTop: 12 }}>
-        <div>
-          <Editor value={code} onChange={onCodeChange} language="python" />
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => navigator.clipboard?.writeText(window.location.href)}
+          >
+            Copy Invite Link
+          </button>
+          <button onClick={rename}>Rename</button>
         </div>
+      </div>
 
-        <aside style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-            <strong>Chat</strong>
-            <div style={{ marginTop: 8, minHeight: 140 }}>
-              {msgs.length === 0 ? <em>No messages yet</em> : msgs.map((m, i) => <div key={i}>• {m}</div>)}
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Say hi"
-                style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
-              />
-              <button onClick={sendChat} style={{ padding: "8px 12px", borderRadius: 8 }}>Send</button>
-            </div>
+      {/* Editor */}
+      <div style={{ gridArea: "editor", minWidth: 0, minHeight: 0 }}>
+        <Editor roomId={roomId} />
+      </div>
+
+      {/* Sidebar */}
+      <div
+        style={{
+          gridArea: "sidebar",
+          borderLeft: "1px solid #e5e5e5",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
+      >
+        <div style={{ padding: 12, borderBottom: "1px solid #eee" }}>
+          <div style={{ marginBottom: 6, fontWeight: 600 }}>
+            You: <code>{name}</code>
           </div>
-        </aside>
-      </section>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>In room:</div>
+          <ul
+            style={{
+              margin: 0,
+              paddingLeft: 18,
+              maxHeight: 140,
+              overflowY: "auto",
+            }}
+          >
+            {members.map((m) => (
+              <li key={m}>{m}</li>
+            ))}
+          </ul>
+        </div>
 
-      <p style={{ color: "#777", marginTop: 10 }}>
-        Open this in two tabs with the same room, e.g. <code>?room=demo</code>.
-      </p>
-    </main>
+        <div
+          style={{
+            padding: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            minHeight: 0,
+            height: "100%",
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>Chat</div>
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: "auto",
+              border: "1px solid #eee",
+              borderRadius: 6,
+              padding: 8,
+              background: "#fff",
+            }}
+          >
+            {messages.map((m, i) => (
+              <div key={i} style={{ marginBottom: 6 }}>
+                <b>{m.name || "User"}</b>: {m.text}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              ref={chatInputRef}
+              placeholder="Type a message"
+              style={{ flex: 1 }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") sendChat();
+              }}
+            />
+            <button onClick={sendChat}>Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

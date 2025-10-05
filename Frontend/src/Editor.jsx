@@ -1,54 +1,77 @@
+// Editor.jsx
 import { useEffect, useRef } from "react";
 import * as monaco from "monaco-editor";
+import { io } from "socket.io-client";
 
-/**
- * Props:
- *  - value: string (the current code to display)
- *  - onChange: fn(nextCode: string) => void (called when local edits happen)
- *  - language: string (e.g., "python" | "javascript")
- */
-export default function Editor({ value, onChange, language = "python" }) {
-  const containerRef = useRef(null);
+// Reuse the same socket as App.jsx by importing `io` here is fine if you
+// keep a second instance from connecting. The simplest is: emit/listen
+// via window.socket set in App. But to keep this drop-in, we'll just
+// listen for code:apply sent by the server and emit code:update via the
+// same server URL. If you prefer a single shared socket instance,
+// pass `socket` down from App as a prop and remove the local one here.
+
+const socket = io("http://localhost:5050", {
+  transports: ["websocket"],
+  withCredentials: true,
+  autoConnect: true,
+});
+
+export default function Editor({ roomId, language = "javascript" }) {
+  const editorElRef = useRef(null);
   const editorRef = useRef(null);
+  const inboundRef = useRef("");
+  const throttleRef = useRef(null);
 
-  // Create the editor once
   useEffect(() => {
-    editorRef.current = monaco.editor.create(containerRef.current, {
-      value: value ?? "",
-      language,
-      automaticLayout: true, // adjusts to container size
-      minimap: { enabled: false },
-      theme: "vs", // default theme
-      fontSize: 14,
-    });
+    const el = editorElRef.current;
+    if (!el) return;
 
-    // When user types, notify parent
-    const sub = editorRef.current.onDidChangeModelContent(() => {
-      const next = editorRef.current.getValue();
-      onChange?.(next);
+    const editor = monaco.editor.create(el, {
+      value: "// Start coding...\n",
+      language,
+      automaticLayout: true,
+      fontSize: 14,
+      minimap: { enabled: false },
     });
+    editorRef.current = editor;
+
+    // join room on connect (in case this socket is separate)
+    const onConnect = () => {
+      socket.emit("join", { roomId, name: localStorage.getItem("mu_name") || "" });
+    };
+
+    // local -> server (throttled)
+    const onChange = () => {
+      const code = editor.getValue();
+      if (code === inboundRef.current) return;
+      clearTimeout(throttleRef.current);
+      throttleRef.current = setTimeout(() => {
+        socket.emit("code:update", { roomId, code });
+      }, 120);
+    };
+    const disposable = editor.onDidChangeModelContent(onChange);
+
+    // server -> local
+    const onApply = (payload) => {
+      if (!payload || payload.roomId !== roomId) return;
+      const current = editor.getValue();
+      if (payload.code !== current) {
+        inboundRef.current = payload.code;
+        editor.setValue(payload.code);
+      }
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("code:apply", onApply);
 
     return () => {
-      sub.dispose();
-      editorRef.current?.dispose();
+      disposable?.dispose();
+      socket.off("connect", onConnect);
+      socket.off("code:apply", onApply);
+      clearTimeout(throttleRef.current);
+      try { editor.dispose(); } catch {}
     };
-  }, []); // mount once
+  }, [roomId, language]);
 
-  // When parent value changes (from socket), update editor if different
-  useEffect(() => {
-    const ed = editorRef.current;
-    if (!ed) return;
-    const current = ed.getValue();
-    if (value !== current) {
-      // Avoid cursor jumps by only updating when truly different
-      ed.setValue(value ?? "");
-    }
-  }, [value]);
-
-  return (
-    <div
-      ref={containerRef}
-      style={{ height: "70vh", border: "1px solid #ddd", borderRadius: 8 }}
-    />
-  );
+  return <div ref={editorElRef} style={{ width: "100%", height: "100%" }} />;
 }
