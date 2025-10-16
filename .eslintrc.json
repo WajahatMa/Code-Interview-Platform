@@ -1,0 +1,13 @@
+{
+  "extends": ["google", "plugin:react/recommended"],
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "module",
+    "ecmaFeatures": { "jsx": true }
+  },
+  "env": { "browser": true, "es6": true },
+  "rules": {
+    "require-jsdoc": "off",
+    "indent": ["error", 2]
+  }
+}
